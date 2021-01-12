@@ -1,0 +1,423 @@
+---
+title: "Flux Calculation for real time gas analyzers"
+author: "Holly Andrews and Alex Krichels"
+date: "December, 2020"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+Goal:  Import soil climate, CO2, N2O, and NOx raw data along with LI-8100 chamber measurement times (hereafter, "summary" data). 
+
+
+```{r packages}
+library(chron)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(cowplot)
+library(DescTools)
+```
+
+Make a function that loops through CO2 and N2O data and extracts rows for a 90-second interval (90 rows total) of N2O data.  UPDATE: This function now calculates flux for each 90-second interval and prints the slope (flux), intercept, and R2 in the new dataset!  Makes calculations easier to see quickly.
+
+```{r functions}
+#CO2 flux
+extractCO2 <- function(smalldata, bigdata) { #smalldata = chamber measurement times (summary data), bigdata = raw 8100 values
+  df <- data.frame()
+  for (row in 1:nrow(smalldata)) {
+    endrow <- smalldata$DateNum[row]
+    beginrow <- endrow-90 #need to hardcode whatever interval to calculate flux over, may depend on experimental conditions; this is the number of seconds in your measurement window
+    end <- bigdata[which.min(abs(bigdata$DateNum - endrow)),]
+    begin <- bigdata[which.min(abs(bigdata$DateNum-beginrow)),]
+    sub <- bigdata[which(bigdata$DateNum == begin$DateNum):which(bigdata$DateNum == end$DateNum),]
+    sub$TSB <- sub$DateNum-sub$DateNum[1] #TSB = Time Since Beginning (of measurement)
+    if(count(sub)>5) { #ensures that you have at least 5 data points in 90-second measurement time 
+       temp <- mean(sub$Temp)
+       moist <- mean(sub$H2O)
+       chamTemp <- mean(sub$Tcham)
+       pCO2 <- summary(lm(sub$Cdry~sub$TSB))
+       mCO2 <- pCO2$coefficients[2]
+       bCO2 <- pCO2$coefficients[1]
+       rCO2 <- pCO2$r.squared
+       #if(sub$Cdry[1]<500 | mCO2>0) {  #has only been used in one dataset of Holly's data
+       lines <- data.frame(smalldata[row,],mCO2,bCO2,temp,moist,rCO2,chamTemp)
+       df <- rbind(df,lines)
+       #}
+    }
+  } 
+  return(df)
+}
+
+#N2O flux
+extractN2O <- function(smalldata, bigdata) {
+  df <- data.frame()
+  for (row in 1:nrow(smalldata)) {
+    endrow <- smalldata$DateNum[row]-10
+    beginrow <- endrow-90 #need to hardcode whatever interval to calculate flux over, may depend on experimental conditions
+    end <- bigdata[which.min(abs(bigdata$DateNum - endrow)),]
+    begin <- bigdata[which.min(abs(bigdata$DateNum-beginrow)),]
+    sub <- bigdata[which(bigdata$DateNum == begin$DateNum):which(bigdata$DateNum == end$DateNum),]
+    sub$TSB <- sub$DateNum-sub$DateNum[1]
+    if(count(sub)>5) {
+       pN2O <- summary(lm(sub$N2O~sub$TSB))
+       mN2O <- pN2O$coefficients[2]
+       bN2O <- pN2O$coefficients[1]
+       rN2O <- pN2O$r.squared
+       lines <- data.frame(smalldata[row,],mN2O,bN2O,rN2O)
+       df <- rbind(df,lines)
+    }
+  } 
+  return(df)
+}
+
+#N2O iso - this is taking the average of the last 10 seconds for the isotope measurements
+extractISO <- function(smalldata, bigdata) {
+  df <- data.frame()
+  for (row in 1:nrow(smalldata)) {
+    endrow <- smalldata$DateNum[row]-10
+    beginrow <- endrow-10 #need to hardcode whatever interval to calculate flux over, may depend on experimental conditions
+    end <- bigdata[which.min(abs(bigdata$DateNum - endrow)),]
+    begin <- bigdata[which.min(abs(bigdata$DateNum-beginrow)),]
+    sub <- bigdata[which(bigdata$DateNum == begin$DateNum):which(bigdata$DateNum == end$DateNum),]
+    sub$TSB <- sub$DateNum-sub$DateNum[1]
+    if(count(sub)>1) {
+       d15N <- mean(sub$d15N)
+       lines <- data.frame(smalldata[row,],d15N)
+       df <- rbind(df,lines)
+    }
+  } 
+  return(df)
+}
+
+#NOx flux
+extractNOx <- function(smalldata, bigdata) {
+  df <- data.frame()
+  for (row in 1:nrow(smalldata)) {
+    endrow <- smalldata$DateNum[row]
+    beginrow <- endrow-90 #need to hardcode whatever interval to calculate flux over, may depend on experimental conditions
+    end <- bigdata[which.min(abs(bigdata$DateNum - endrow)),]
+    begin <- bigdata[which.min(abs(bigdata$DateNum-beginrow)),]
+    sub <- bigdata[which(bigdata$DateNum == begin$DateNum):which(bigdata$DateNum == end$DateNum),]
+    sub$TSB <- sub$DateNum-sub$DateNum[1]
+    if(count(sub)>4) { #4 data point minimum since NOx data is in 10-second intervals
+      pNO <- summary(lm(sub$NO~sub$TSB))
+      mNO <- pNO$coefficients[2]
+      bNO <- pNO$coefficients[1]
+      pNO2 <- summary(lm(sub$NO2~sub$TSB))
+      mNO2 <- pNO2$coefficients[2]
+      bNO2 <- pNO2$coefficients[1]
+      rNO <- pNO$r.squared
+      rNO2 <- pNO2$r.squared
+      lines <- data.frame(smalldata[row,],mNO,bNO,mNO2,bNO2,rNO,rNO2)
+      df <- rbind(df,lines)
+    }
+  } 
+  return(df)
+}
+  
+extrapolateFlux <- function(data, offset) {
+  C_g_mol <- 12
+  N_g_mol <- 14.0067
+  R_constant <- 0.0821
+  chamber_area <- 0.03178 
+  volume <- (19.0 + 4076.2 + 55.0 + 237.0 + (324.13*offset))/1000
+  data$CO2flux <- data$mCO2 * volume * C_g_mol / chamber_area / R_constant / (data$chamTemp + 273.15) #Final units: ug CO2-C m^-2 s^-1
+  data$N2Oflux <- data$mN2O * volume * (2*N_g_mol) / chamber_area / R_constant /(data$chamTemp + 273.15)#Final units: ug N2O-N m^-2 s^-1
+  data$NOflux <- data$mNO * volume * N_g_mol / chamber_area / R_constant / (data$chamTemp + 273.15) #Final units: ng NO-N m^-2 s^-1
+  return(data)
+}
+
+#Volume includes all instrumets etc. in cubic cm
+
+```
+
+
+PART I: RAW DATA COMPILATION AND STORAGE
+
+
+This section imports individual CO2, N2O, and NOx files and merges them into larger files which are exported.  Once files are written, this section shouldn't need to be run unless changes are made to raw data.
+
+```{r import-CO2-subset}
+setwd("C:/Users/ahkri/Licor_Data")
+
+#raw 8100 data
+CO2datafile <- read.delim("2018_Licor_NSpiral_raw.txt",sep="\t",header=TRUE,skip=34) #number of skip lines may need to be amended depending on dataset, usually skip is 29 or 30 lines; if error generated, try different # skip lines
+
+CO2datanohead <- subset(CO2datafile,Type=="1") #gets rid of the header, footer, and summary
+
+CO2datasub <- data.frame(CO2datanohead$Date,CO2datanohead$Cdry,CO2datanohead$V2,CO2datanohead$V3, CO2datanohead$Tcham)
+colnames(CO2datasub) <- c("Date","Cdry","Temp","H2O","Tcham")
+CO2datasub <- arrange(CO2datasub,Date)
+CO2datasub$Date <- as.POSIXct(CO2datasub$Date, format="%Y-%m-%d %H:%M:%S")
+CO2datasub <- subset(CO2datasub, Date > as.POSIXct("2018-08-21 08:04:40"))
+CO2datasub <- subset(CO2datasub, Date < as.POSIXct("2018-08-22 08:30:01"))
+
+
+#CO2 summary data
+CO2sum <- read.delim("2018_Licor_NSpiral_sum.txt",sep="\t",header=TRUE)
+CO2sumsub <- data.frame(CO2sum$Port,CO2sum$Date_IV,CO2sum$DOY_IV,CO2sum$Exp_Flux, CO2sum$Exp_Flux)
+colnames(CO2sumsub) <- c("Port.","Date","DOY","Exp_flux","Exp_flux_1")
+CO2sumsub$Date <- as.POSIXct(CO2sumsub$Date, format="%Y-%m-%d %H:%M:%S")
+CO2sumsub <- subset(CO2sumsub, Date > as.POSIXct("2018-08-21 08:04:40"))
+CO2sumsub <- subset(CO2sumsub, Date < as.POSIXct("2018-08-22 08:30:01"))
+
+
+write.table(CO2datasub, file = "C:/Users/ahkri/R_Outputs/CO2raw.txt", sep = ",", row.names = FALSE) # "bigdata"
+
+write.table(CO2sumsub, file = "C:/Users/ahkri/R_Outputs/CO2sum.txt", sep = ",", row.names = FALSE)  # "Smalldata"
+```
+
+```{r import-N2O-subset}
+#raw N2O data
+N2Odatafolder <- "C:/Users/ahkri/LGR_Data/"
+N2Olist <- list.files(path=N2Odatafolder, pattern="*.txt")
+N2Odata <- do.call("rbind", lapply(N2Olist, function(x) read.delim(paste(N2Odatafolder, x, sep=''),sep=",",skip=1,header=TRUE,stringsAsFactors = FALSE)))
+N2Odata2 <- subset(N2Odata, X.N2O._ppm > 0) #subsetting to remove footer and other useless rows
+
+write.table(N2Odata2, file = "C:/Users/ahkri/OneDrive/Desktop/Projects/POSTDOC/N SPiraling/2018_Fluxes/Boyd/Nitrate/R_Outputs/N2Oraw.txt", sep = ",", row.names = FALSE) #
+
+N2Odatasub <- data.frame(N2Odata2$Time, N2Odata2$X.N2O._ppm, N2Odata2$d15N)
+colnames(N2Odatasub) <- c("Date","N2O", "d15N")
+
+write.table(N2Odatasub, file = "C:/Users/ahkri/R_Outputs/N2Oraw2col.txt", sep = ",", row.names = FALSE) #"bigdata" for N2O
+```
+
+```{r import-NOx-subset}
+#raw NOx data 
+NOxdata <- read.delim("C:/Users/ahkri/NOx_Data/NoxBox_Data5sec.dat",skip=1,header=TRUE,sep=",")
+NOxdata$TIMESTAMP <- as.POSIXct(NOxdata$TIMESTAMP, format="%Y-%m-%d %H:%M:%S")
+NOxsub <- subset(NOxdata, TIMESTAMP > as.POSIXct("2018-08-20 00:00:00")) # since this file is huge, I subsetted only to campaign-specific data
+NOxsub2 <- data.frame(NOxsub$TIMESTAMP,NOxsub$NO2_Avg,NOxsub$NO_Avg,NOxsub$NOx_Avg)
+colnames(NOxsub2) <- c("Date","NO2","NO","NOx")
+
+write.table(NOxsub2, file = "C:/Users/ahkri/R_Outputs/NOxraw.txt", sep = ",", row.names = FALSE)
+
+```
+
+To save memory in R, suggest to clear environment at this point.
+
+
+PART II: CHAMBER FLUX CALCULATIONS
+Re-import raw and summary data and use extract functions to calculate individual chamber flux measurements (i.e. regression slopes).  Then add to new dataframe.
+
+```{r import-extract}
+setwd("C:/Users/ahkri/R_Outputs/")
+CO2data <- read.delim("CO2raw.txt",header=TRUE,sep=",")
+CO2sum <- read.delim("CO2sum.txt",header=TRUE,sep=",")
+N2Odata <- read.delim("N2Oraw2col.txt",header=TRUE,sep=",")
+NOxdata <- read.delim("NOxraw.txt",header=TRUE,sep=",")
+
+CO2data$Date <- as.POSIXct(CO2data$Date,format= "%Y-%m-%d %H:%M:%S")
+CO2sum$Date <- as.POSIXct(CO2sum$Date)
+N2Odata$Date <- as.POSIXct(N2Odata$Date,format=" %m/%d/%Y %H:%M:%S")
+NOxdata$Date <- as.POSIXct(NOxdata$Date)
+
+CO2data$DateNum <- as.numeric(CO2data$Date)
+CO2sum$DateNum <- as.numeric(CO2sum$Date)
+N2Odata$DateNum <- as.numeric(N2Odata$Date)
+NOxdata$DateNum <- as.numeric(NOxdata$Date)
+
+CO2data$Cdry <- as.numeric(as.character(CO2data$Cdry))
+CO2data$Temp <- as.numeric(as.character(CO2data$Temp))
+CO2data$H2O <- as.numeric(as.character(CO2data$H2O))
+N2Odata$N2O <- as.numeric(as.character(N2Odata$N2O))
+N2Odata$d15NA <- as.numeric(as.character(N2Odata$d15NA))
+N2Odata$d15NB <- as.numeric(as.character(N2Odata$d15NB))
+N2Odata$d15N <- as.numeric(as.character(N2Odata$d15N))
+N2Odata$SP <- as.numeric(as.character(N2Odata$SP))
+N2Odata$d18O <- as.numeric(as.character(N2Odata$d18O))
+N2Odata$d17O <- as.numeric(as.character(N2Odata$d17O))
+
+
+NOxdata$NO2 <- as.numeric(as.character(NOxdata$NO2))
+NOxdata$NO <- as.numeric(as.character(NOxdata$NO))
+NOxdata$NOx <- as.numeric(as.character(NOxdata$NOx))
+#NOxdata2 <- subset(NOxdata, NO2 > -200 & NO2 < 1000000) #if NOx data needs cleaning; this data can be problematic
+#NOxdatanona <- NOxdata2[complete.cases(NOxdata2),] # subsetted to just cases where all cells in a row are filled
+
+
+###
+
+#If instrument times are not perfectly synced then they may need to be corrected. Here, they were off by around 15 seconds
+
+N2Odata$DateNum <- (N2Odata$DateNum + 140) #insert offset here (in seconds) if it is a fixed time
+NOxdata$DateNum <- (NOxdata$DateNum  + 160) #insert offset here (in seconds) if it is a fixed time
+###
+
+#subset summary data by ports so that it is easier to add treatment, port, etc., info before merging
+port1 <- subset(CO2sum, Port.=="1")
+port2 <- subset(CO2sum, Port.=="2")
+port3 <- subset(CO2sum, Port.=="3")
+port4 <- subset(CO2sum, Port.=="4")
+port5 <- subset(CO2sum, Port.=="5")
+port6 <- subset(CO2sum, Port.=="6")
+port7 <- subset(CO2sum, Port.=="7")
+port8 <- subset(CO2sum, Port.=="8")
+
+#run extraction functions for each port
+CO2ex1 <- extractCO2(port1,CO2data)
+N2Oex1 <- extractN2O(port1,N2Odata)
+N2OISO1 <- extractISO(port1,N2Odata)
+NOxex1 <- extractNOx(port1,NOxdata)
+port1CO2N2O <- merge(CO2ex1,N2Oex1, by="DateNum",all=TRUE) # the "all" argument keeps all data even if it exists for CO2 and not N2O or vice versa
+port1CO2N2OISO <- merge(port1CO2N2O, N2OISO1, by="DateNum",all=TRUE)
+
+port1gas <- merge(port1CO2N2OISO,NOxex1,by="DateNum",all=TRUE)
+
+CO2ex2 <- extractCO2(port2,CO2data)
+N2Oex2 <- extractN2O(port2,N2Odata)
+N2OISO2 <- extractISO(port2,N2Odata)
+NOxex2 <- extractNOx(port2,NOxdata)
+port2CO2N2O <- merge(CO2ex2,N2Oex2, by="DateNum",all=TRUE)
+port2CO2N2OISO <- merge(port2CO2N2O, N2OISO2, by="DateNum",all=TRUE)
+port2gas <- merge(port2CO2N2OISO,NOxex2,by="DateNum",all=TRUE)
+
+CO2ex3 <- extractCO2(port3,CO2data)
+N2Oex3 <- extractN2O(port3,N2Odata)
+N2OISO3 <- extractISO(port3,N2Odata)
+NOxex3 <- extractNOx(port3,NOxdata)
+port3CO2N2O <- merge(CO2ex3,N2Oex3, by="DateNum",all=TRUE)
+port3CO2N2OISO <- merge(port3CO2N2O, N2OISO3, by="DateNum",all=TRUE)
+port3gas <- merge(port3CO2N2OISO,NOxex3,by="DateNum",all=TRUE)
+
+CO2ex4 <- extractCO2(port4,CO2data)
+N2Oex4 <- extractN2O(port4,N2Odata)
+N2OISO4 <- extractISO(port4,N2Odata)
+NOxex4 <- extractNOx(port4,NOxdata)
+port4CO2N2O <- merge(CO2ex4,N2Oex4, by="DateNum",all=TRUE)
+port4CO2N2OISO <- merge(port4CO2N2O, N2OISO4, by="DateNum",all=TRUE)
+port4gas <- merge(port4CO2N2OISO,NOxex4,by="DateNum",all=TRUE)
+
+CO2ex5 <- extractCO2(port5,CO2data)
+N2Oex5 <- extractN2O(port5,N2Odata)
+N2OISO5 <- extractISO(port5,N2Odata)
+NOxex5 <- extractNOx(port5,NOxdata)
+port5CO2N2O <- merge(CO2ex5,N2Oex5, by="DateNum",all=TRUE)
+port5CO2N2OISO <- merge(port5CO2N2O, N2OISO5, by="DateNum",all=TRUE)
+port5gas <- merge(port5CO2N2OISO,NOxex5,by="DateNum",all=TRUE)
+
+CO2ex6 <- extractCO2(port6,CO2data)
+N2Oex6 <- extractN2O(port6,N2Odata)
+N2OISO6 <- extractISO(port6,N2Odata)
+NOxex6 <- extractNOx(port6,NOxdata)
+port6CO2N2O <- merge(CO2ex6,N2Oex6, by="DateNum",all=TRUE)
+port6CO2N2OISO <- merge(port6CO2N2O, N2OISO6, by="DateNum",all=TRUE)
+port6gas <- merge(port6CO2N2OISO,NOxex6,by="DateNum",all=TRUE)
+
+CO2ex7 <- extractCO2(port7,CO2data)
+N2Oex7 <- extractN2O(port7,N2Odata)
+N2OISO7 <- extractISO(port7,N2Odata)
+NOxex7 <- extractNOx(port7,NOxdata)
+port7CO2N2O <- merge(CO2ex7,N2Oex7, by="DateNum",all=TRUE)
+port7CO2N2OISO <- merge(port7CO2N2O, N2OISO7, by="DateNum",all=TRUE)
+port7gas <- merge(port7CO2N2OISO,NOxex7,by="DateNum",all=TRUE)
+
+CO2ex8 <- extractCO2(port8,CO2data)
+N2Oex8 <- extractN2O(port8,N2Odata)
+N2OISO8 <- extractISO(port8,N2Odata)
+NOxex8 <- extractNOx(port8,NOxdata)
+port8CO2N2O <- merge(CO2ex8,N2Oex8, by="DateNum",all=TRUE)
+port8CO2N2OISO <- merge(port8CO2N2O, N2OISO8, by="DateNum",all=TRUE)
+port8gas <- merge(port8CO2N2OISO,NOxex8,by="DateNum",all=TRUE)
+
+#add port and other information
+    port1gas$Port. <- "1"
+    port2gas$Port. <- "2"
+    port3gas$Port. <- "3"
+    port4gas$Port. <- "4"
+    port5gas$Port. <- "5"
+    port6gas$Port. <- "6"
+    port7gas$Port. <- "7"
+    port8gas$Port. <- "8"
+
+#these numbers manually added to show when water was added to soil    
+        port1gas$TimeSinceWetting <- (port1gas$DateNum-1534866071)
+        port2gas$TimeSinceWetting <- (port2gas$DateNum-1534866313)
+        port3gas$TimeSinceWetting <- (port3gas$DateNum-1534866556)
+        port4gas$TimeSinceWetting <- (port4gas$DateNum-1534866798)
+        port5gas$TimeSinceWetting <- (port5gas$DateNum-1534867039)
+        port6gas$TimeSinceWetting <- (port6gas$DateNum-1534867282)
+        port7gas$TimeSinceWetting <- (port7gas$DateNum-1534867525)
+        port8gas$TimeSinceWetting <- (port8gas$DateNum-1534867766)
+
+    
+gasslopes <- rbind(port1gas,port2gas,port3gas,port4gas,port5gas,port6gas,port7gas,port8gas)
+
+write.table(gasslopes, file = "C:/Users/ahkri/Routputs/chamberfluxes.txt", sep = ",", row.names = FALSE)
+
+```
+
+PART III: FLUX EXTRAPOLATION.   Here we need to subset by port to incorporate collar offsets; the best way to do this is probably to calculate each port's fluxes separately and then merge all together again.  To calculate Vtotals, go into header info within a random 8100 observation within file viewer and recalculate based off of chamber offsets.
+
+```{r full-flux}
+setwd("C:/Users/ahkri/R_outputs")
+flux <- read.delim("chamberfluxes.txt",header=TRUE,sep=",")
+
+port1 <- subset(flux, Port.=="1")
+port2 <- subset(flux, Port.=="2")
+port3 <- subset(flux, Port.=="3")
+port4 <- subset(flux, Port.=="4")
+port5 <- subset(flux, Port.=="5")
+port6 <- subset(flux, Port.=="6")
+port7 <- subset(flux, Port.=="7")
+port8 <- subset(flux, Port.=="8")
+
+
+flux1 <- extrapolateFlux(port1, 6.00)   #note, 6 is an example here - update these numbers based on chamber and collar volume
+flux2 <- extrapolateFlux(port2, 6.00)
+flux3 <- extrapolateFlux(port3, 6.00)
+flux4 <- extrapolateFlux(port4, 6.00)
+flux5 <- extrapolateFlux(port5, 6.00)
+flux6 <- extrapolateFlux(port6, 6.00)
+flux7 <- extrapolateFlux(port7, 6.00)
+flux8 <- extrapolateFlux(port8, 6.00)
+
+# Beolow is an example of how to calculate the  chamber volume, which is inclued above as the second bumber in the extrapolate flux function. 
+         # CollarConstant = (3.14*(10.16^2))  # this is just PI * r2 part of volume calculation for 8in collar 
+           # C1O <- mean(c(1.3,2.3,2.5))  #enter inner offsets here
+           # C1I <- mean(c(5.5,8.3,9.1)) # enter outer offsets here
+          #  C1Vol <- (CollarConstant*(C1I-C1O)/1000)
+
+
+fluxall <- rbind(flux1,flux2,flux3,flux4,flux5,flux6,flux7,flux8)
+
+write.table(fluxall, file = "C:/Users/ahkri/R_outputs/fluxes.txt", sep = ",", row.names = FALSE)
+
+```
+
+NEXT STEPS: Visualization and analysis. See other .Rmd files for code on plotting.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
