@@ -158,7 +158,7 @@ CO2sum <- read.delim("2018_Licor_NSpiral_sum.txt",sep="\t",header=TRUE)
 CO2sumsub <- data.frame(CO2sum$Port,CO2sum$Date_IV,CO2sum$DOY_IV,CO2sum$Exp_Flux, CO2sum$Exp_Flux)
 colnames(CO2sumsub) <- c("Port.","Date","DOY","Exp_flux","Exp_flux_1")
 CO2sumsub$Date <- as.POSIXct(CO2sumsub$Date, format="%Y-%m-%d %H:%M:%S")
-CO2sumsub <- subset(CO2sumsub, Date > as.POSIXct("2018-08-21 08:04:40"))
+CO2sumsub <- subset(CO2sumsub, Date > as.POSIXct("2018-08-21 08:04:40")) #This time frame works with the example dataset
 CO2sumsub <- subset(CO2sumsub, Date < as.POSIXct("2018-08-22 08:30:01"))
 
 
@@ -238,10 +238,10 @@ NOxdata$NOx <- as.numeric(as.character(NOxdata$NOx))
 
 ###
 
-#If instrument times are not perfectly synced then they may need to be corrected. Here, they were off by around 15 seconds
+#If instrument times are not perfectly synced then they may need to be corrected. 
 
-N2Odata$DateNum <- (N2Odata$DateNum + 140) #insert offset here (in seconds) if it is a fixed time
-NOxdata$DateNum <- (NOxdata$DateNum  + 160) #insert offset here (in seconds) if it is a fixed time
+N2Odata$DateNum <- (N2Odata$DateNum + 140) #insert offset here (in seconds) if it is a fixed time. This offset works for the example dataset
+NOxdata$DateNum <- (NOxdata$DateNum  + 160) #insert offset here (in seconds) if it is a fixed time. This offset works for the example dataset
 ###
 
 #subset summary data by ports so that it is easier to add treatment, port, etc., info before merging
